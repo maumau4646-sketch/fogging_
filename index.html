@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Aplikasi Manajemen Fogging</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'fog-yellow': '#FFD166',
+                        'fog-blue': '#118AB2',
+                        'fog-green': '#06D6A0',
+                        'fog-pink': '#FF6B6B',
+                        'fog-dark': '#073B4C'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @media print {
+            body * { visibility: hidden; }
+            #report-printable-area, #report-printable-area * { visibility: visible; }
+            #report-printable-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                box-shadow: none !important;
+                border: none !important;
+                margin: 0 !important;
+                padding: 15px !important;
+            }
+            @page {
+                size: landscape;
+                margin: 10mm;
+            }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen flex flex-col">
+
+    <div id="app" class="flex-1 flex flex-col"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, addDoc, getDocs, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        let app, db, auth, userId = null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'fogging-app-ceria';
+
+        const state = {
+            isLoggedIn: false,
+            currentTab: 'dashboard',
+            filterMonth: new Date().toISOString().split('T')[0].substring(0, 7),
+            transactions: [],
+            appPassword: 'admin',
+            appName: 'Ceria Fogging',
+            logoUrl: '',
+            companyAddress: 'Jl. Contoh Perumahan No. 123, Kota Anda',
+            ownerName: 'Bapak Pimpinan',
+            signatureUrl: '',
+            selectedTxForPreview: null
+        };
+
+        window.state = state;
+
+        async function initFirebase() {
+            try {
+                if (typeof __firebase_config !== 'undefined') {
+                    const firebaseConfig = JSON.parse(__firebase_config);
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    userId = auth.currentUser?.uid || crypto.randomUUID();
+                    await loadDataFromCloud();
+                }
+            } catch (e) {
+                console.warn("Firebase offline/local mode active:", e);
+            }
+            window.render();
+        }
+
+        window.saveSettingsToCloud = async function() {
+            if (!db || !userId) return;
+            try {
+                const sRef = doc(db, 'artifacts', appId, 'users', userId, 'config', 'settings');
+                await setDoc(sRef, {
+                    appPassword: state.appPassword,
+                    appName: state.appName,
+                    logoUrl: state.logoUrl,
+                    companyAddress: state.companyAddress,
+                    ownerName: state.ownerName,
+                    signatureUrl: state.signatureUrl,
+                    hasLoggedIn: state.isLoggedIn
+                });
+            } catch(err) {
+                console.error("Error saving settings:", err);
+            }
+        }
+
+        window.saveTxToCloud = async function(txData) {
+            if (!db || !userId) return;
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'users', userId, 'transactions');
+                if (txData.id) {
+                    const docRef = doc(db, 'artifacts', appId, 'users', userId, 'transactions', txData.id);
+                    await setDoc(docRef, txData);
+                } else {
+                    const docRef = await addDoc(colRef, txData);
+                    txData.id = docRef.id;
+                    await updateDoc(docRef, { id: docRef.id });
+                }
+            } catch(err) {
+                console.error("Error saving transaction:", err);
+            }
+        }
+
+        window.deleteTxFromCloud = async function(id) {
+            if (!db || !userId) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'users', userId, 'transactions', id);
+                await deleteDoc(docRef);
+            } catch(err) {
+                console.error("Error deleting transaction:", err);
+            }
+        }
+
+        async function loadDataFromCloud() {
+            if (!db || !userId) return;
+            try {
+                const sRef = doc(db, 'artifacts', appId, 'users', userId, 'config', 'settings');
+                const sSnap = await getDoc(sRef);
+                if (sSnap.exists()) {
+                    const d = sSnap.data();
+                    if(d.appPassword) state.appPassword = d.appPassword;
+                    if(d.appName) state.appName = d.appName;
+                    if(d.logoUrl) state.logoUrl = d.logoUrl;
+                    if(d.companyAddress) state.companyAddress = d.companyAddress;
+                    if(d.ownerName) state.ownerName = d.ownerName;
+                    if(d.signatureUrl) state.signatureUrl = d.signatureUrl;
+                    if(d.hasLoggedIn) state.isLoggedIn = d.hasLoggedIn;
+                }
+
+                const colRef = collection(db, 'artifacts', appId, 'users', userId, 'transactions');
+                const qSnap = await getDocs(colRef);
+                state.transactions = [];
+                qSnap.forEach((docSnap) => {
+                    state.transactions.push(docSnap.data());
+                });
+            } catch(err) {
+                console.error("Error loading data:", err);
+            }
+        }
+
+        window.resizeImage = function(file, callback) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    const canvas = document.createElement('canvas');
+                    const MAX_WIDTH = 400;
+                    const MAX_HEIGHT = 400;
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width > height) {
+                        if (width > MAX_WIDTH) {
+                            height *= MAX_WIDTH / width;
+                            width = MAX_WIDTH;
+                        }
+                    } else {
+                        if (height > MAX_HEIGHT) {
+                            width *= MAX_HEIGHT / height;
+                            height = MAX_HEIGHT;
+                        }
+                    }
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    callback(canvas.toDataURL('image/png'));
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        };
+
+        window.render = function() {
+            const appEl = document.getElementById('app');
+            if (!state.isLoggedIn) {
+                appEl.innerHTML = getLoginHTML();
+            } else {
+                appEl.innerHTML = `
+                    <div class="flex-1 flex flex-col md:flex-row bg-slate-100 min-h-screen">
+                        <!-- Desktop Sidebar -->
+                        <aside class="hidden md:flex flex-col w-64 lg:w-72 bg-fog-dark text-white p-6 shadow-xl justify-between shrink-0">
+                            <div>
+                                <div class="flex items-center gap-3.5 mb-8 pb-4 border-b border-white/10">
+                                    <div class="bg-fog-yellow text-fog-dark w-11 h-11 rounded-2xl flex items-center justify-center font-black text-xl shadow-lg shrink-0"><i class="fas fa-bug"></i></div>
+                                    <div class="overflow-hidden">
+                                        <h1 class="font-extrabold text-base tracking-wide leading-snug text-white truncate">${state.appName}</h1>
+                                        <p class="text-[11px] text-fog-green font-semibold tracking-wider uppercase">Manajemen Pro</p>
+                                    </div>
+                                </div>
+                                <nav class="space-y-2">
+                                    <button onclick="switchTab('dashboard')" class="w-full flex items-center gap-3.5 px-4 py-3.5 rounded-2xl font-bold transition-all text-sm ${state.currentTab === 'dashboard' ? 'bg-fog-blue text-white shadow-lg shadow-fog-blue/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'}"><i class="fas fa-chart-pie w-5 text-center"></i> Beranda</button>
+                                    <button onclick="switchTab('transactions')" class="w-full flex items-center gap-3.5 px-4 py-3.5 rounded-2xl font-bold transition-all text-sm ${state.currentTab === 'transactions' ? 'bg-fog-blue text-white shadow-lg shadow-fog-blue/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'}"><i class="fas fa-receipt w-5 text-center"></i> Transaksi & Invoice</button>
+                                    <button onclick="switchTab('report')" class="w-full flex items-center gap-3.5 px-4 py-3.5 rounded-2xl font-bold transition-all text-sm ${state.currentTab === 'report' ? 'bg-fog-blue text-white shadow-lg shadow-fog-blue/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'}"><i class="fas fa-file-invoice-dollar w-5 text-center"></i> Laporan Keuangan</button>
+                                    <button onclick="switchTab('settings')" class="w-full flex items-center gap-3.5 px-4 py-3.5 rounded-2xl font-bold transition-all text-sm ${state.currentTab === 'settings' ? 'bg-fog-blue text-white shadow-lg shadow-fog-blue/30' : 'text-slate-300 hover:bg-white/5 hover:text-white'}"><i class="fas fa-cog w-5 text-center"></i> Pengaturan</button>
+                                </nav>
+                            </div>
+                            <button onclick="logout()" class="w-full flex items-center justify-center gap-2 bg-fog-pink/20 text-fog-pink border border-fog-pink/30 hover:bg-fog-pink hover:text-white px-4 py-3.5 rounded-2xl font-bold transition-all text-sm shadow-sm"><i class="fas fa-sign-out-alt"></i> Keluar</button>
+                        </aside>
+
+                        <!-- Mobile Header -->
+                        <header class="md:hidden bg-fog-dark text-white px-4 py-3.5 flex justify-between items-center shadow-md sticky top-0 z-20">
+                            <div class="flex items-center gap-3 overflow-hidden">
+                                <div class="bg-fog-yellow text-fog-dark w-9 h-9 rounded-xl flex items-center justify-center font-black shadow shrink-0"><i class="fas fa-bug"></i></div>
+                                <div class="truncate">
+                                    <span class="font-bold text-sm tracking-wide block leading-tight truncate">${state.appName}</span>
+                                    <span class="text-[10px] text-fog-green font-semibold uppercase">Manajemen Pro</span>
+                                </div>
+                            </div>
+                            <button onclick="logout()" class="text-fog-pink bg-white/10 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-fog-pink hover:text-white transition-all shrink-0"><i class="fas fa-sign-out-alt mr-1"></i> Keluar</button>
+                        </header>
+
+                        <!-- Main Content Container with Fluid Scaling -->
+                        <main class="flex-1 p-3 sm:p-6 lg:p-8 overflow-y-auto pb-24 md:pb-8 w-full max-w-7xl mx-auto">
+                            ${state.currentTab === 'dashboard' ? getDashboardHTML() : ''}
+                            ${state.currentTab === 'transactions' ? getTransactionsHTML() : ''}
+                            ${state.currentTab === 'report' ? getReportHTML() : ''}
+                            ${state.currentTab === 'settings' ? getSettingsHTML() : ''}
+                        </main>
+
+                        <!-- Mobile Bottom Nav -->
+                        <nav class="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-2 py-2 flex justify-around items-center z-30 shadow-lg">
+                            <button onclick="switchTab('dashboard')" class="flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${state.currentTab === 'dashboard' ? 'text-fog-blue font-extrabold bg-fog-blue/10' : 'text-slate-400 font-medium'}"><i class="fas fa-chart-pie text-base"></i><span class="text-[10px]">Beranda</span></button>
+                            <button onclick="switchTab('transactions')" class="flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${state.currentTab === 'transactions' ? 'text-fog-blue font-extrabold bg-fog-blue/10' : 'text-slate-400 font-medium'}"><i class="fas fa-receipt text-base"></i><span class="text-[10px]">Transaksi</span></button>
+                            <button onclick="switchTab('report')" class="flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${state.currentTab === 'report' ? 'text-fog-blue font-extrabold bg-fog-blue/10' : 'text-slate-400 font-medium'}"><i class="fas fa-file-invoice-dollar text-base"></i><span class="text-[10px]">Laporan</span></button>
+                            <button onclick="switchTab('settings')" class="flex flex-col items-center gap-1 py-1 px-3 rounded-xl transition-all ${state.currentTab === 'settings' ? 'text-fog-blue font-extrabold bg-fog-blue/10' : 'text-slate-400 font-medium'}"><i class="fas fa-cog text-base"></i><span class="text-[10px]">Pengaturan</span></button>
+                        </nav>
+                    </div>
+                `;
+            }
+            window.attachEventListeners();
+        }
+
+        function getLoginHTML() {
+            return `
+                <div class="flex-1 flex items-center justify-center bg-gradient-to-br from-fog-dark via-slate-800 to-fog-blue p-4">
+                    <div class="bg-white rounded-3xl shadow-2xl p-6 sm:p-8 w-full max-w-md border border-white/20">
+                        <div class="text-center mb-6 sm:mb-8">
+                            <div class="bg-fog-yellow text-fog-dark w-16 h-16 rounded-3xl mx-auto flex items-center justify-center text-3xl font-black shadow-lg mb-4 transform rotate-3"><i class="fas fa-bug"></i></div>
+                            <h2 class="text-2xl font-black text-slate-900 tracking-tight">${state.appName}</h2>
+                            <p class="text-sm text-slate-500 font-medium mt-1">Silakan masuk untuk mengelola layanan</p>
+                        </div>
+                        <form id="login-form" class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Username</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-4 flex items-center text-slate-400"><i class="fas fa-user"></i></span>
+                                    <input type="text" id="username" value="admin" required class="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-fog-blue outline-none font-medium text-sm sm:text-base">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Password</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-4 flex items-center text-slate-400"><i class="fas fa-lock"></i></span>
+                                    <input type="password" id="password" required class="w-full pl-11 pr-12 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-fog-blue outline-none font-medium text-sm sm:text-base">
+                                    <button type="button" onclick="togglePassword()" class="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none">
+                                        <i id="eye-icon" class="fas fa-eye"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="login-error" class="hidden text-xs font-bold text-fog-pink bg-fog-pink/10 p-3 rounded-xl text-center">Username atau Password salah!</div>
+                            <button type="submit" class="w-full bg-fog-blue hover:bg-opacity-90 text-white font-black py-4 rounded-2xl shadow-lg shadow-fog-blue/30 transition-all transform active:scale-95 text-sm sm:text-base">Masuk Yuk!</button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getDashboardHTML() {
+            const currentMonth = state.filterMonth;
+            const monthTxs = state.transactions.filter(t => t.date && t.date.startsWith(currentMonth));
+            const income = monthTxs.filter(t => t.type === 'income').reduce((sum, t) => sum + Number(t.amount), 0);
+            const expense = monthTxs.filter(t => t.type === 'expense').reduce((sum, t) => sum + Number(t.amount), 0);
+            const balance = income - expense;
+
+            return `
+                <div class="space-y-6 max-w-6xl mx-auto">
+                    <!-- Welcome & Month Filter Banner -->
+                    <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100">
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="bg-fog-yellow/20 text-fog-dark font-black text-[11px] px-3 py-1 rounded-full uppercase tracking-wider">Dashboard Utama</span>
+                                <span class="text-xs text-slate-400 font-medium"><i class="fas fa-shield-alt text-fog-green mr-1"></i> Admin Terverifikasi</span>
+                            </div>
+                            <h2 class="text-xl sm:text-3xl font-black text-slate-800 tracking-tight">Halo, Admin ${state.appName}! 👋</h2>
+                            <p class="text-xs sm:text-sm text-slate-500 font-medium mt-1">Berikut ringkasan performa & keuangan layanan fogging periode bulan ini.</p>
+                        </div>
+                        <div class="flex items-center gap-2 bg-slate-50 px-3.5 py-2.5 rounded-2xl border border-slate-200 w-full md:w-auto">
+                            <span class="text-xs font-bold text-slate-600 whitespace-nowrap"><i class="fas fa-calendar-alt text-fog-blue mr-1"></i> Periode:</span>
+                            <input type="month" value="${currentMonth}" onchange="changeFilterMonth(this.value)" class="bg-white px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-200 outline-none flex-1 md:flex-initial">
+                        </div>
+                    </div>
+
+                    <!-- Quick Action Buttons -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                        <button onclick="openTransactionModal('income')" class="bg-fog-green hover:bg-opacity-90 text-white p-4 sm:p-5 rounded-2xl shadow-md shadow-fog-green/20 flex flex-col items-center justify-center gap-2 transition-all transform active:scale-95 group">
+                            <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-lg group-hover:scale-110 transition-all"><i class="fas fa-plus"></i></div>
+                            <span class="font-extrabold text-xs sm:text-sm text-center">Pemasukan Baru</span>
+                        </button>
+                        <button onclick="openTransactionModal('expense')" class="bg-fog-pink hover:bg-opacity-90 text-white p-4 sm:p-5 rounded-2xl shadow-md shadow-fog-pink/20 flex flex-col items-center justify-center gap-2 transition-all transform active:scale-95 group">
+                            <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-lg group-hover:scale-110 transition-all"><i class="fas fa-minus"></i></div>
+                            <span class="font-extrabold text-xs sm:text-sm text-center">Pengeluaran Baru</span>
+                        </button>
+                        <button onclick="switchTab('transactions')" class="bg-fog-blue hover:bg-opacity-90 text-white p-4 sm:p-5 rounded-2xl shadow-md shadow-fog-blue/20 flex flex-col items-center justify-center gap-2 transition-all transform active:scale-95 group">
+                            <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-lg group-hover:scale-110 transition-all"><i class="fas fa-receipt"></i></div>
+                            <span class="font-extrabold text-xs sm:text-sm text-center">Semua Transaksi</span>
+                        </button>
+                        <button onclick="switchTab('report')" class="bg-fog-dark hover:bg-opacity-90 text-white p-4 sm:p-5 rounded-2xl shadow-md shadow-fog-dark/20 flex flex-col items-center justify-center gap-2 transition-all transform active:scale-95 group">
+                            <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-lg group-hover:scale-110 transition-all"><i class="fas fa-file-invoice-dollar"></i></div>
+                            <span class="font-extrabold text-xs sm:text-sm text-center">Laporan Bulanan</span>
+                        </button>
+                    </div>
+
+                    <!-- Financial Summary Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+                        <div class="bg-gradient-to-br from-fog-green to-emerald-600 text-white p-5 sm:p-7 rounded-3xl shadow-xl shadow-fog-green/20 relative overflow-hidden">
+                            <div class="absolute right-[-20px] bottom-[-20px] text-white/10 text-9xl font-black pointer-events-none"><i class="fas fa-arrow-trend-up"></i></div>
+                            <div class="flex justify-between items-center mb-4 relative z-10">
+                                <span class="text-xs font-extrabold uppercase tracking-wider bg-white/20 px-3 py-1 rounded-full">Total Pemasukan</span>
+                                <div class="bg-white/20 w-11 h-11 rounded-2xl flex items-center justify-center text-xl"><i class="fas fa-arrow-trend-up"></i></div>
+                            </div>
+                            <h3 class="text-2xl sm:text-3xl font-black relative z-10">Rp ${income.toLocaleString('id-ID')}</h3>
+                            <p class="text-xs text-white/80 mt-1 relative z-10">Periode Bulan ${currentMonth}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-fog-pink to-rose-600 text-white p-5 sm:p-7 rounded-3xl shadow-xl shadow-fog-pink/20 relative overflow-hidden">
+                            <div class="absolute right-[-20px] bottom-[-20px] text-white/10 text-9xl font-black pointer-events-none"><i class="fas fa-arrow-trend-down"></i></div>
+                            <div class="flex justify-between items-center mb-4 relative z-10">
+                                <span class="text-xs font-extrabold uppercase tracking-wider bg-white/20 px-3 py-1 rounded-full">Total Pengeluaran</span>
+                                <div class="bg-white/20 w-11 h-11 rounded-2xl flex items-center justify-center text-xl"><i class="fas fa-arrow-trend-down"></i></div>
+                            </div>
+                            <h3 class="text-2xl sm:text-3xl font-black relative z-10">Rp ${expense.toLocaleString('id-ID')}</h3>
+                            <p class="text-xs text-white/80 mt-1 relative z-10">Periode Bulan ${currentMonth}</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-fog-blue to-cyan-600 text-white p-5 sm:p-7 rounded-3xl shadow-xl shadow-fog-blue/20 relative overflow-hidden">
+                            <div class="absolute right-[-20px] bottom-[-20px] text-white/10 text-9xl font-black pointer-events-none"><i class="fas fa-wallet"></i></div>
+                            <div class="flex justify-between items-center mb-4 relative z-10">
+                                <span class="text-xs font-extrabold uppercase tracking-wider bg-white/20 px-3 py-1 rounded-full">Saldo Bersih</span>
+                                <div class="bg-white/20 w-11 h-11 rounded-2xl flex items-center justify-center text-xl"><i class="fas fa-wallet"></i></div>
+                            </div>
+                            <h3 class="text-2xl sm:text-3xl font-black relative z-10">Rp ${balance.toLocaleString('id-ID')}</h3>
+                            <p class="text-xs text-white/80 mt-1 relative z-10">Pemasukan dikurangi pengeluaran</p>
+                        </div>
+                    </div>
+
+                    <!-- Recent Activities Section -->
+                    <div class="bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100">
+                        <div class="flex justify-between items-center mb-6">
+                            <div>
+                                <h3 class="font-extrabold text-slate-800 text-lg sm:text-xl">Aktivitas Terakhir</h3>
+                                <p class="text-xs text-slate-400 mt-0.5">Daftar transaksi masuk dan keluar terbaru di bulan ini</p>
+                            </div>
+                            <button onclick="switchTab('transactions')" class="text-xs font-bold text-fog-blue bg-fog-blue/10 px-4 py-2.5 rounded-xl hover:bg-fog-blue hover:text-white transition-all">Lihat Semua</button>
+                        </div>
+                        <div class="space-y-3">
+                            ${monthTxs.slice(-5).reverse().map(t => `
+                                <div class="flex items-center justify-between p-4 sm:p-5 rounded-2xl bg-slate-50 hover:bg-slate-100/70 border border-slate-100 gap-4 transition-all">
+                                    <div class="flex items-center gap-3.5 overflow-hidden">
+                                        <div class="w-11 h-11 shrink-0 rounded-2xl flex items-center justify-center font-bold text-base ${t.type === 'income' ? 'bg-fog-green/20 text-fog-green' : 'bg-fog-pink/20 text-fog-pink'}">
+                                            <i class="fas ${t.type === 'income' ? 'fa-arrow-down' : 'fa-arrow-up'}"></i>
+                                        </div>
+                                        <div class="truncate">
+                                            <h4 class="font-bold text-sm sm:text-base text-slate-800 truncate">${t.customerName || t.category || 'Transaksi'}</h4>
+                                            <p class="text-xs text-slate-400 mt-0.5">${t.date} • <span class="font-semibold text-slate-600">${t.type === 'income' ? 'Pemasukan Layanan' : 'Pengeluaran Operasional'}</span></p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right shrink-0">
+                                        <span class="font-black text-sm sm:text-base ${t.type === 'income' ? 'text-fog-green' : 'text-fog-pink'}">
+                                            ${t.type === 'income' ? '+' : '-'} Rp ${Number(t.amount).toLocaleString('id-ID')}
+                                        </span>
+                                        ${t.type === 'income' ? `<div class="mt-1"><button onclick="openInvoicePreview('${t.id}')" class="text-[11px] font-bold text-fog-blue hover:underline bg-fog-blue/10 px-2 py-0.5 rounded"><i class="fas fa-file-invoice mr-1"></i>Invoice</button></div>` : ''}
+                                    </div>
+                                </div>
+                            `).join('')}
+                            ${monthTxs.length === 0 ? '<div class="text-center text-slate-400 py-12 text-sm font-medium bg-slate-50 rounded-2xl border border-dashed border-slate-200"><i class="fas fa-receipt text-3xl mb-2 block text-slate-300"></i>Belum ada transaksi tercatat di bulan ini. Silakan buat transaksi baru!</div>' : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getTransactionsHTML() {
+            const filtered = state.transactions.filter(t => t.date && t.date.startsWith(state.filterMonth));
+            return `
+                <div class="space-y-6 max-w-6xl mx-auto">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100">
+                        <div>
+                            <h2 class="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">Transaksi & Invoice</h2>
+                            <p class="text-xs sm:text-sm text-slate-500 font-medium mt-0.5">Catat pesanan pelanggan dan operasional bisnis.</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+                            <input type="month" value="${state.filterMonth}" onchange="changeFilterMonth(this.value)" class="bg-slate-50 px-3.5 py-2.5 rounded-2xl text-xs font-bold border border-slate-200 outline-none flex-1 sm:flex-initial">
+                            <button onclick="openTransactionModal('income')" class="bg-fog-green hover:bg-opacity-90 text-white px-4 py-2.5 rounded-2xl font-extrabold text-xs shadow-md shadow-fog-green/30 flex items-center gap-1.5"><i class="fas fa-plus"></i> Pemasukan</button>
+                            <button onclick="openTransactionModal('expense')" class="bg-fog-pink hover:bg-opacity-90 text-white px-4 py-2.5 rounded-2xl font-extrabold text-xs shadow-md shadow-fog-pink/30 flex items-center gap-1.5"><i class="fas fa-minus"></i> Pengeluaran</button>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse min-w-[650px]">
+                                <thead>
+                                    <tr class="bg-slate-50 border-b border-slate-100 text-[11px] font-black text-slate-400 uppercase tracking-wider">
+                                        <th class="p-4.5">Tanggal</th>
+                                        <th class="p-4.5">Jenis & Keterangan</th>
+                                        <th class="p-4.5">Pelanggan / Kategori</th>
+                                        <th class="p-4.5 text-right">Jumlah (Rp)</th>
+                                        <th class="p-4.5 text-center">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-xs sm:text-sm">
+                                    ${filtered.map(t => `
+                                        <tr class="hover:bg-slate-50/50 transition-all">
+                                            <td class="p-4.5 font-medium text-slate-600 text-xs">${t.date}</td>
+                                            <td class="p-4.5 font-bold text-slate-800">${t.type === 'income' ? 'Fogging Service' : (t.category || 'Operasional')}</td>
+                                            <td class="p-4.5 font-medium text-slate-600">${t.customerName || '-'}</td>
+                                            <td class="p-4.5 font-black text-right ${t.type === 'income' ? 'text-fog-green' : 'text-fog-pink'}">
+                                                ${t.type === 'income' ? '+' : '-'} Rp ${Number(t.amount).toLocaleString('id-ID')}
+                                            </td>
+                                            <td class="p-4.5 text-center">
+                                                <div class="flex items-center justify-center gap-1.5">
+                                                    ${t.type === 'income' ? `<button onclick="openInvoicePreview('${t.id}')" title="Preview Invoice" class="p-2.5 bg-fog-blue/10 text-fog-blue hover:bg-fog-blue hover:text-white rounded-xl text-xs transition-all"><i class="fas fa-file-invoice"></i></button>` : ''}
+                                                    <button onclick="editTransaction('${t.id}')" title="Edit" class="p-2.5 bg-amber-50 text-amber-500 hover:bg-amber-500 hover:text-white rounded-xl text-xs transition-all"><i class="fas fa-pen"></i></button>
+                                                    <button onclick="deleteTransaction('${t.id}')" title="Hapus" class="p-2.5 bg-fog-pink/10 text-fog-pink hover:bg-fog-pink hover:text-white rounded-xl text-xs transition-all"><i class="fas fa-trash"></i></button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                    ${filtered.length === 0 ? `<tr><td colspan="5" class="p-10 text-center text-slate-400 font-medium">Belum ada data transaksi bulan ini.</td></tr>` : ''}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Modal Form Transaksi -->
+                <div id="tx-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden z-50 flex items-center justify-center p-4">
+                    <div class="bg-white rounded-3xl shadow-2xl p-6 sm:p-8 w-full max-w-lg border border-slate-100 max-h-[90vh] overflow-y-auto">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 id="modal-title" class="text-lg sm:text-xl font-black text-slate-800">Tambah Transaksi</h3>
+                            <button onclick="closeTransactionModal()" class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200"><i class="fas fa-times"></i></button>
+                        </div>
+                        <form id="tx-form" class="space-y-4">
+                            <input type="hidden" id="tx-id">
+                            <input type="hidden" id="tx-type">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Tanggal</label>
+                                <input type="date" id="tx-date" required class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                            </div>
+                            <div id="income-fields" class="space-y-4">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Nama Pelanggan</label>
+                                    <input type="text" id="tx-customer" placeholder="Contoh: Budi Santoso" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Alamat / Lokasi Fogging</label>
+                                    <textarea id="tx-address" rows="2" placeholder="Alamat lengkap tempat fogging..." class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue"></textarea>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Luas Area / Paket Layanan</label>
+                                    <input type="text" id="tx-package" placeholder="Contoh: Rumah Tipe 45 / 200 m²" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                                </div>
+                            </div>
+                            <div id="expense-fields" class="space-y-4 hidden">
+                                <div>
+                                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Kategori Pengeluaran</label>
+                                    <input type="text" id="tx-category" placeholder="Contoh: Beli Pestisida / Bahan Bakar" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Jumlah Nominal (Rp)</label>
+                                <input type="number" id="tx-amount" required placeholder="0" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-black text-base sm:text-lg outline-none focus:ring-2 focus:ring-fog-blue">
+                            </div>
+                            <button type="submit" class="w-full bg-fog-dark text-white font-black py-4 rounded-2xl shadow-lg shadow-fog-dark/20 hover:bg-opacity-90 transition-all mt-2 text-xs sm:text-sm">Simpan Transaksi</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Modal Preview Invoice -->
+                <div id="invoice-preview-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden z-50 flex items-center justify-center p-2 sm:p-4">
+                    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[95vh]">
+                        <div class="p-4 bg-slate-100 flex justify-between items-center border-b border-slate-200 shrink-0">
+                            <h3 class="font-extrabold text-slate-800 text-xs sm:text-sm">Preview Invoice Pelanggan</h3>
+                            <button onclick="closeInvoicePreview()" class="w-8 h-8 rounded-full bg-white flex items-center justify-center text-slate-500 hover:bg-slate-200 shadow-sm"><i class="fas fa-times"></i></button>
+                        </div>
+                        <div class="p-4 sm:p-8 overflow-y-auto flex-1 bg-slate-50">
+                            <div id="invoice-printable-area" class="bg-white p-6 sm:p-8 rounded-2xl shadow-sm border border-slate-200 text-slate-800 text-xs sm:text-sm">
+                                <div class="flex flex-col sm:flex-row justify-between items-start gap-4 border-b border-slate-200 pb-6 mb-6">
+                                    <div class="flex items-center gap-3">
+                                        ${state.logoUrl ? `<img src="${state.logoUrl}" class="w-14 h-14 object-contain rounded-xl bg-slate-50 p-1 border border-slate-100">` : `<div class="w-14 h-14 bg-fog-yellow text-fog-dark font-black rounded-xl flex items-center justify-center text-xl shrink-0"><i class="fas fa-bug"></i></div>`}
+                                        <div>
+                                            <h1 class="font-black text-base sm:text-xl text-fog-dark">${state.appName} Service</h1>
+                                            <p class="text-[11px] text-slate-500 whitespace-pre-line leading-tight mt-0.5">${state.companyAddress}</p>
+                                        </div>
+                                    </div>
+                                    <div class="text-left sm:text-right">
+                                        <span class="bg-fog-green/20 text-fog-green px-3 py-1 rounded-full font-extrabold text-[10px] uppercase">LUNAS / INVOICE</span>
+                                        <p id="inv-number" class="font-extrabold text-slate-700 mt-2 text-xs">INV/2026/001</p>
+                                        <p id="inv-date" class="text-[11px] text-slate-400">Tanggal: -</p>
+                                    </div>
+                                </div>
+
+                                <div class="mb-6 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Kepada Yth:</p>
+                                    <h4 id="inv-customer" class="font-bold text-slate-800 text-sm sm:text-base">-</h4>
+                                    <p id="inv-address" class="text-slate-600 text-xs mt-0.5">-</p>
+                                </div>
+
+                                <div class="overflow-x-auto mb-6">
+                                    <table class="w-full border-collapse min-w-[400px]">
+                                        <thead>
+                                            <tr class="border-b border-slate-200 text-slate-400 text-[11px] uppercase font-bold">
+                                                <th class="py-2 text-left">Deskripsi Layanan</th>
+                                                <th class="py-2 text-center">Luas / Unit</th>
+                                                <th class="py-2 text-right">Total Biaya</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr class="border-b border-slate-100">
+                                                <td class="py-3 font-bold text-slate-800">Jasa Pembasmian Nyamuk & Fogging Profesional</td>
+                                                <td id="inv-package" class="py-3 text-center text-slate-600">-</td>
+                                                <td id="inv-amount" class="py-3 text-right font-black text-fog-dark">Rp 0</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-end pt-4 border-t border-slate-200 gap-6">
+                                    <div class="text-[10px] text-slate-400 leading-relaxed">
+                                        <p class="font-bold text-slate-600">Terima kasih telah menggunakan layanan kami!</p>
+                                        <p>Layanan fogging aman, ramah lingkungan, dan terpercaya.</p>
+                                    </div>
+                                    <div class="text-center self-end sm:self-auto">
+                                        <p class="text-[11px] text-slate-600 mb-1">Hormat Kami,</p>
+                                        ${state.signatureUrl ? `<img src="${state.signatureUrl}" class="h-12 w-auto mx-auto object-contain my-1">` : `<div class="h-10"></div>`}
+                                        <p class="font-bold text-xs text-slate-800 border-t border-slate-300 pt-1 px-4">${state.ownerName}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-4 bg-white border-t border-slate-200 flex justify-end gap-3 shrink-0">
+                            <button onclick="closeInvoicePreview()" class="px-4 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-xl text-xs hover:bg-slate-200">Tutup</button>
+                            <button onclick="executeDownloadPDF('invoice-printable-area', 'Invoice-Fogging.pdf')" class="px-4 py-2.5 bg-fog-blue text-white font-black rounded-xl text-xs shadow-md shadow-fog-blue/30 hover:bg-opacity-90 flex items-center gap-1.5"><i class="fas fa-download"></i> Download PDF (F4)</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getReportHTML() {
+            const filtered = state.transactions.filter(t => t.date && t.date.startsWith(state.filterMonth));
+            const income = filtered.filter(t => t.type === 'income').reduce((sum, t) => sum + Number(t.amount), 0);
+            const expense = filtered.filter(t => t.type === 'expense').reduce((sum, t) => sum + Number(t.amount), 0);
+            const balance = income - expense;
+
+            return `
+                <div class="space-y-6 max-w-6xl mx-auto">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100">
+                        <div>
+                            <h2 class="text-xl sm:text-2xl font-black text-slate-800 tracking-tight">Laporan Keuangan Bulanan</h2>
+                            <p class="text-xs sm:text-sm text-slate-500 font-medium mt-0.5">Rekapitulasi pemasukan dan pengeluaran operasional.</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+                            <input type="month" value="${state.filterMonth}" onchange="changeFilterMonth(this.value)" class="bg-slate-50 px-3.5 py-2.5 rounded-2xl text-xs font-bold border border-slate-200 outline-none flex-1 sm:flex-initial">
+                            <button onclick="executeDownloadPDF('report-printable-area', 'Laporan-Keuangan-${state.filterMonth}.pdf')" class="bg-fog-blue hover:bg-opacity-90 text-white px-4 py-2.5 rounded-2xl font-black text-xs shadow-md shadow-fog-blue/30 flex items-center gap-1.5"><i class="fas fa-download"></i> Download PDF (F4)</button>
+                            <button onclick="window.print()" class="bg-fog-green hover:bg-opacity-90 text-white px-4 py-2.5 rounded-2xl font-black text-xs shadow-md shadow-fog-green/30 flex items-center gap-1.5"><i class="fas fa-print"></i> Cetak Otomatis</button>
+                        </div>
+                    </div>
+
+                    <div id="report-printable-area" class="bg-white p-5 sm:p-10 rounded-3xl shadow-sm border border-slate-100 space-y-6">
+                        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 pb-6">
+                            <div class="flex items-center gap-3">
+                                ${state.logoUrl ? `<img src="${state.logoUrl}" class="w-14 h-14 object-contain rounded-xl bg-slate-50 p-1 border border-slate-100">` : `<div class="w-14 h-14 bg-fog-yellow text-fog-dark font-black rounded-xl flex items-center justify-center text-xl shrink-0"><i class="fas fa-bug"></i></div>`}
+                                <div>
+                                    <h1 class="font-extrabold text-base sm:text-lg text-fog-dark">Laporan Keuangan ${state.appName}</h1>
+                                    <p class="text-xs text-slate-500">Periode Bulan: <span class="font-bold text-slate-700">${state.filterMonth}</span></p>
+                                </div>
+                            </div>
+                            <div class="text-left sm:text-right text-xs">
+                                <p class="font-bold text-slate-600">${state.ownerName}</p>
+                                <p class="text-[10px] text-slate-400">Dicetak otomatis oleh sistem</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                <span class="text-[11px] font-bold text-slate-400 uppercase">Total Pemasukan</span>
+                                <h4 class="font-black text-base sm:text-lg text-fog-green mt-1">Rp ${income.toLocaleString('id-ID')}</h4>
+                            </div>
+                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                <span class="text-[11px] font-bold text-slate-400 uppercase">Total Pengeluaran</span>
+                                <h4 class="font-black text-base sm:text-lg text-fog-pink mt-1">Rp ${expense.toLocaleString('id-ID')}</h4>
+                            </div>
+                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                <span class="text-[11px] font-bold text-slate-400 uppercase">Saldo Akhir</span>
+                                <h4 class="font-black text-base sm:text-lg text-fog-blue mt-1">Rp ${balance.toLocaleString('id-ID')}</h4>
+                            </div>
+                        </div>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse min-w-[550px]">
+                                <thead>
+                                    <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-extrabold text-slate-400 uppercase tracking-wider">
+                                        <th class="p-3.5">Tanggal</th>
+                                        <th class="p-3.5">Jenis</th>
+                                        <th class="p-3.5">Keterangan / Pelanggan</th>
+                                        <th class="p-3.5 text-right">Nominal</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-xs sm:text-sm">
+                                    ${filtered.map(t => `
+                                        <tr>
+                                            <td class="p-3.5 text-slate-600">${t.date}</td>
+                                            <td class="p-3.5 font-bold ${t.type === 'income' ? 'text-fog-green' : 'text-fog-pink'}">${t.type === 'income' ? 'Pemasukan' : 'Pengeluaran'}</td>
+                                            <td class="p-3.5 font-medium text-slate-800">${t.customerName || t.category || '-'}</td>
+                                            <td class="p-3.5 text-right font-extrabold ${t.type === 'income' ? 'text-fog-green' : 'text-fog-pink'}">
+                                                ${t.type === 'income' ? '+' : '-'} Rp ${Number(t.amount).toLocaleString('id-ID')}
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                    ${filtered.length === 0 ? `<tr><td colspan="4" class="p-8 text-center text-slate-400">Tidak ada transaksi pada periode ini.</td></tr>` : ''}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div class="flex justify-end pt-6 border-t border-slate-100">
+                            <div class="text-center">
+                                <p class="text-xs text-slate-600 mb-1">Pimpinan / Pemilik,</p>
+                                ${state.signatureUrl ? `<img src="${state.signatureUrl}" class="h-14 w-auto mx-auto object-contain my-1">` : `<div class="h-12"></div>`}
+                                <p class="font-bold text-xs text-slate-800 border-t border-slate-300 pt-1 px-8">${state.ownerName}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getSettingsHTML() {
+            return `
+                <div class="space-y-6 max-w-xl mx-auto pb-12">
+                    <h2 class="text-xl sm:text-2xl font-black text-slate-800 border-b border-slate-200 pb-4 tracking-tight">Pengaturan Aplikasi</h2>
+                    
+                    <div class="bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-sm sm:text-base flex items-center gap-2.5"><div class="bg-fog-blue/10 text-fog-blue w-9 h-9 rounded-full flex items-center justify-center shrink-0"><i class="fas fa-building"></i></div>Profil & Nama Perusahaan</h3>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Nama Perusahaan / Aplikasi</label>
+                            <input type="text" id="setting-appname" value="${state.appName}" placeholder="Contoh: Ceria Fogging" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                            <p class="text-[10px] text-slate-400 mt-1">Nama ini akan otomatis tampil di header, login, invoice, dan laporan.</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Nama Pimpinan / Pemilik</label>
+                            <input type="text" id="setting-owner" value="${state.ownerName}" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase mb-1.5">Alamat Kantor / Layanan</label>
+                            <textarea id="setting-address" rows="3" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">${state.companyAddress}</textarea>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-sm sm:text-base flex items-center gap-2.5"><div class="bg-purple-100 text-purple-600 w-9 h-9 rounded-full flex items-center justify-center shrink-0"><i class="fas fa-file-signature"></i></div>Tanda Tangan Digital</h3>
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-4 bg-slate-50 p-4 rounded-2xl border border-dashed border-slate-200" id="preview-signature-container">
+                            ${state.signatureUrl ? `<img src="${state.signatureUrl}" class="h-14 w-auto object-contain bg-white rounded-lg p-1 border border-slate-200">` : `<div class="w-14 h-14 bg-white border border-slate-200 rounded-lg flex items-center justify-center text-slate-300 shrink-0"><i class="fas fa-signature text-xl"></i></div>`}
+                            <div class="flex-1 w-full">
+                                <input type="file" accept="image/*" onchange="handleSignatureUpload(event)" class="block w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-purple-100 file:text-purple-600 cursor-pointer">
+                            </div>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Gunakan gambar tanda tangan berlatar transparan (PNG).</p>
+                    </div>
+
+                    <div class="bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-sm sm:text-base flex items-center gap-2.5"><div class="bg-amber-100 text-amber-600 w-9 h-9 rounded-full flex items-center justify-center shrink-0"><i class="fas fa-image"></i></div>Logo Perusahaan</h3>
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-4 bg-slate-50 p-4 rounded-2xl border border-dashed border-slate-200" id="preview-logo-container">
+                            ${state.logoUrl ? `<img src="${state.logoUrl}" class="h-14 w-14 object-contain bg-white rounded-lg p-1 border border-slate-200">` : `<div class="w-14 h-14 bg-white border border-slate-200 rounded-lg flex items-center justify-center text-slate-300 shrink-0"><i class="fas fa-building text-xl"></i></div>`}
+                            <div class="flex-1 w-full">
+                                <input type="file" accept="image/*" onchange="handleLogoUpload(event)" class="block w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-amber-100 file:text-amber-700 cursor-pointer">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-5 sm:p-8 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-sm sm:text-base flex items-center gap-2.5"><div class="bg-fog-pink/10 text-fog-pink w-9 h-9 rounded-full flex items-center justify-center shrink-0"><i class="fas fa-lock"></i></div>Ubah Password Login</h3>
+                        <div>
+                            <input type="password" id="new-password" placeholder="Kosongkan jika tidak ingin mengubah..." class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium outline-none focus:ring-2 focus:ring-fog-blue">
+                        </div>
+                    </div>
+
+                    <div class="pt-2">
+                        <button id="btn-save-all-settings" onclick="saveAllSettings()" class="w-full bg-fog-dark text-white font-black py-4 rounded-2xl shadow-lg shadow-fog-dark/20 hover:bg-opacity-90 transition-all flex items-center justify-center gap-2 text-xs sm:text-sm">
+                            <i class="fas fa-save"></i> Simpan Semua Pengaturan
+                        </button>
+                        <div id="settings-msg" class="hidden text-xs font-bold text-center bg-fog-green text-white p-3.5 rounded-2xl mt-3 shadow">Pengaturan berhasil disimpan ke Cloud!</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        window.switchTab = function(tab) {
+            state.currentTab = tab;
+            window.render();
+        }
+
+        window.changeFilterMonth = function(val) {
+            state.filterMonth = val;
+            window.render();
+        }
+
+        window.togglePassword = function() {
+            const pwd = document.getElementById('password');
+            const icon = document.getElementById('eye-icon');
+            if (pwd.type === 'password') {
+                pwd.type = 'text';
+                icon.classList.remove('fa-eye');
+                icon.classList.add('fa-eye-slash');
+            } else {
+                pwd.type = 'password';
+                icon.classList.remove('fa-eye-slash');
+                icon.classList.add('fa-eye');
+            }
+        }
+
+        window.logout = async function() {
+            state.isLoggedIn = false;
+            await window.saveSettingsToCloud();
+            window.render();
+        }
+
+        window.openTransactionModal = function(type, id = null) {
+            const modal = document.getElementById('tx-modal');
+            const title = document.getElementById('modal-title');
+            const typeInput = document.getElementById('tx-type');
+            const dateInput = document.getElementById('tx-date');
+            const incomeFields = document.getElementById('income-fields');
+            const expenseFields = document.getElementById('expense-fields');
+            
+            typeInput.value = type;
+            dateInput.value = new Date().toISOString().split('T')[0];
+            
+            if (type === 'income') {
+                title.textContent = 'Tambah Pemasukan (Fogging)';
+                incomeFields.classList.remove('hidden');
+                expenseFields.classList.add('hidden');
+            } else {
+                title.textContent = 'Tambah Pengeluaran Operasional';
+                incomeFields.classList.add('hidden');
+                expenseFields.classList.remove('hidden');
+            }
+
+            if (id) {
+                const t = state.transactions.find(item => item.id === id);
+                if (t) {
+                    document.getElementById('tx-id').value = t.id;
+                    dateInput.value = t.date;
+                    document.getElementById('tx-amount').value = t.amount;
+                    if (t.type === 'income') {
+                        document.getElementById('tx-customer').value = t.customerName || '';
+                        document.getElementById('tx-address').value = t.customerAddress || '';
+                        document.getElementById('tx-package').value = t.packageInfo || '';
+                    } else {
+                        document.getElementById('tx-category').value = t.category || '';
+                    }
+                }
+            } else {
+                document.getElementById('tx-id').value = '';
+                document.getElementById('tx-amount').value = '';
+                if(document.getElementById('tx-customer')) document.getElementById('tx-customer').value = '';
+                if(document.getElementById('tx-address')) document.getElementById('tx-address').value = '';
+                if(document.getElementById('tx-package')) document.getElementById('tx-package').value = '';
+                if(document.getElementById('tx-category')) document.getElementById('tx-category').value = '';
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        window.closeTransactionModal = function() {
+            document.getElementById('tx-modal').classList.add('hidden');
+        }
+
+        window.editTransaction = function(id) {
+            const t = state.transactions.find(item => item.id === id);
+            if (t) {
+                window.openTransactionModal(t.type, id);
+            }
+        }
+
+        window.deleteTransaction = async function(id) {
+            state.transactions = state.transactions.filter(t => t.id !== id);
+            await window.deleteTxFromCloud(id);
+            window.render();
+        }
+
+        window.openInvoicePreview = function(id) {
+            const t = state.transactions.find(item => item.id === id);
+            if (!t) return;
+            state.selectedTxForPreview = t;
+            
+            document.getElementById('inv-number').textContent = `INV/${t.date.replaceAll('-', '')}/${t.id.substring(0, 4).toUpperCase()}`;
+            document.getElementById('inv-date').textContent = `Tanggal: ${t.date}`;
+            document.getElementById('inv-customer').textContent = t.customerName || '-';
+            document.getElementById('inv-address').textContent = t.customerAddress || '-';
+            document.getElementById('inv-package').textContent = t.packageInfo || 'Layanan Standar Fogging';
+            document.getElementById('inv-amount').textContent = `Rp ${Number(t.amount).toLocaleString('id-ID')}`;
+
+            document.getElementById('invoice-preview-modal').classList.remove('hidden');
+        }
+
+        window.closeInvoicePreview = function() {
+            document.getElementById('invoice-preview-modal').classList.add('hidden');
+        }
+
+        window.handleLogoUpload = function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                window.resizeImage(file, (resizedBase64) => {
+                    state.logoUrl = resizedBase64;
+                    document.getElementById('preview-logo-container').innerHTML = `
+                        <img src="${resizedBase64}" class="h-14 w-14 object-contain bg-white rounded-lg p-1 border border-slate-200">
+                        <div class="flex-1"><span class="text-xs font-bold text-fog-green">Logo berhasil dipilih!</span></div>
+                    `;
+                });
+            }
+        }
+
+        window.handleSignatureUpload = function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                window.resizeImage(file, (resizedBase64) => {
+                    state.signatureUrl = resizedBase64;
+                    document.getElementById('preview-signature-container').innerHTML = `
+                        <img src="${resizedBase64}" class="h-14 w-auto object-contain bg-white rounded-lg p-1 border border-slate-200">
+                        <div class="flex-1"><span class="text-xs font-bold text-fog-green">Tanda tangan terpilih!</span></div>
+                    `;
+                });
+            }
+        }
+
+        window.saveAllSettings = async function() {
+            const btn = document.getElementById('btn-save-all-settings');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+            btn.disabled = true;
+
+            const newAppName = document.getElementById('setting-appname').value.trim();
+            if (newAppName) {
+                state.appName = newAppName;
+            }
+            state.ownerName = document.getElementById('setting-owner').value;
+            state.companyAddress = document.getElementById('setting-address').value;
+            const newPwd = document.getElementById('new-password').value;
+            if (newPwd.trim() !== '') {
+                state.appPassword = newPwd;
+            }
+
+            await window.saveSettingsToCloud();
+
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+            if(document.getElementById('new-password')) document.getElementById('new-password').value = '';
+
+            const msg = document.getElementById('settings-msg');
+            msg.classList.remove('hidden');
+            setTimeout(() => { if(msg) msg.classList.add('hidden'); }, 3000);
+            
+            // Refresh render to update app name immediately across UI
+            window.render();
+        }
+
+        window.executeDownloadPDF = function(elementId, filename) {
+            const element = document.getElementById(elementId);
+            const originalBg = element.style.backgroundColor;
+            element.style.backgroundColor = 'white';
+            const originalWidth = element.style.width;
+            element.style.width = '1120px';
+
+            const opt = {
+                margin:       [10, 10, 10, 10],
+                filename:     filename,
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { 
+                    scale: 2, 
+                    useCORS: true, 
+                    windowWidth: 1120, 
+                    backgroundColor: '#ffffff' 
+                },
+                jsPDF:        { 
+                    unit: 'mm', 
+                    format: [330, 210], 
+                    orientation: 'landscape',
+                    compress: true 
+                }
+            };
+
+            html2pdf().set(opt).from(element).save().then(() => {
+                element.style.backgroundColor = originalBg;
+                element.style.width = originalWidth;
+            });
+        }
+
+        window.attachEventListeners = function() {
+            const loginForm = document.getElementById('login-form');
+            if (loginForm) {
+                loginForm.onsubmit = async (e) => {
+                    e.preventDefault();
+                    const u = document.getElementById('username').value;
+                    const p = document.getElementById('password').value;
+                    if (u === 'admin' && p === state.appPassword) {
+                        state.isLoggedIn = true;
+                        state.filterMonth = new Date().toISOString().split('T')[0].substring(0, 7);
+                        await window.saveSettingsToCloud();
+                        window.render();
+                    } else {
+                        document.getElementById('login-error').classList.remove('hidden');
+                    }
+                };
+            }
+
+            const txForm = document.getElementById('tx-form');
+            if (txForm) {
+                txForm.onsubmit = async (e) => {
+                    e.preventDefault();
+                    const id = document.getElementById('tx-id').value;
+                    const type = document.getElementById('tx-type').value;
+                    const date = document.getElementById('tx-date').value;
+                    const amount = document.getElementById('tx-amount').value;
+
+                    const txData = {
+                        id: id || crypto.randomUUID(),
+                        type,
+                        date,
+                        amount: Number(amount),
+                        customerName: type === 'income' ? document.getElementById('tx-customer').value : '',
+                        customerAddress: type === 'income' ? document.getElementById('tx-address').value : '',
+                        packageInfo: type === 'income' ? document.getElementById('tx-package').value : '',
+                        category: type === 'expense' ? document.getElementById('tx-category').value : ''
+                    };
+
+                    if (id) {
+                        const idx = state.transactions.findIndex(t => t.id === id);
+                        if (idx !== -1) state.transactions[idx] = txData;
+                    } else {
+                        state.transactions.push(txData);
+                    }
+
+                    await window.saveTxToCloud(txData);
+                    window.closeTransactionModal();
+                    window.render();
+                };
+            }
+        }
+
+        window.onload = function() {
+            initFirebase();
+        };
+    </script>
+</body>
+</html>
